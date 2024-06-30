@@ -5,6 +5,7 @@ const sleep = require("./utils");
 let lastUpdateTimestamp = 0;
 let bitset;
 let checking = false;
+let scale = 2
 
 // connect to server
 console.debug("connecting...");
@@ -13,7 +14,7 @@ socket.connect();
 
 // get initial state
 const fetchInitialState = async () => {
-  console.debug("getting initial state...");
+  process.stdout.write('g ');
   try {
     const response = await fetch(
       "https://onemillioncheckboxes.com/api/initial-state"
@@ -30,34 +31,29 @@ const fetchInitialState = async () => {
 
 const check_them_all = async () => {
   checking = true;
-  console.debug("checking...");
+  let isChanged = false;
 
-  start = 0
-  end = 1000000
+  for (let index = 0; index < 2048 * scale; index++) {
+    if ((index+1) % (2048 * scale-1) == 0) { await fetchInitialState(); }
 
-  if (process.argv[2] != undefined) {
-    start = process.argv[2]
-  }
-
-  if (process.argv[3] != undefined) {
-    end = process.argv[3]
-  }
-
-  for (let index = start; index < end; index++) {
-    // const byteIndex = Math.floor(index / 8);
-    // if (bitset.bytes[byteIndex] === 0) {
-    //   index = byteIndex * 8 + 8;
-    //   continue;
-    // }
-
-    if (!bitset.get(index)) {
-      bitset.set(index, true);
-      socket.emit("toggle_bit", { index: index });
-      await sleep(100);
+    if (index % 128 == 0) {
+      const char = isChanged ? '. ' : 'x ';
+      process.stdout.write(char);
+      isChanged = false;
+    }
+    
+    const buff = bitset.bytes[index];
+    if (buff >= 255) {
+      continue;
     }
 
-    if (index % 1000 === 0) {
-      console.debug(`toggling on index ${index}`);
+    for (let i = 0; i < 8; i++) {
+      const iIndex = index * 8 + i;
+      if (!bitset.get(iIndex)) {
+        toggleCheck(iIndex);
+        isChanged = true;
+        await sleep(5);
+      }
     }
   }
 
@@ -65,59 +61,33 @@ const check_them_all = async () => {
   checking = false;
 };
 
-const toggleCheck = async (s, i) => {
-  s.emit("toggle_bit", { index: i });
-}
+const toggleCheck = async (i) => {
+  socket.emit("toggle_bit", { index: i });
+};
 
 // client-side
 socket.on("connect", async () => {
   console.debug(`successfully connected, socket id is ${socket.id}`);
 
-  await fetchInitialState()
+  let iteration = 0
+  await fetchInitialState();
+  while (true) {
+    console.log(`\nloop #${iteration} scale is ${scale}`)
+    let start = Date.now()
+    await check_them_all();
+    iteration = iteration + 1
 
-  // Listen for full state updates
-  socket.on("full_state", (data) => {
-    console.debug(`Received full state update`);
-    if (data.timestamp > lastUpdateTimestamp) {
-      lastUpdateTimestamp = data.timestamp;
-      bitset = new BitSet({
-        base64String: data.full_state,
-        count: data.count,
-      });
+    const millis = Date.now() - start
+    console.log(`\ndone in #${millis/1000} seconds`)
 
-      console.debug(`Data count is ${data.count}`);
-    }
-  });
-
-  socket.on("batched_bit_toggles", (updates) => {
-    if (!bitset) {
-      return;
+    if (millis > 50000) { 
+      scale = scale - 1;
+      if (scale < 2 ) { scale = 2; }
     }
 
-    const trueUpdates = updates[0];
-    const falseUpdates = updates[1];
-    if (updates.length !== 3) {
-      console.debug("skip by length");
-    } else {
-      const timestamp = updates[2];
-      if (timestamp < lastUpdateTimestamp.current) {
-        console.debug("skip old update");
-      } else {
-        // console.debug(
-        //   `Received batch: ${trueUpdates.length} true / ${falseUpdates.length} false`
-        // );
-        trueUpdates.forEach((index) => {
-          bitset.set(index, true);
-        });
-        falseUpdates.forEach((index) => {
-          toggleCheck(socket, index);
-          bitset.set(index, true);
-        });
-      }
+    if (millis < 2000) { 
+      scale = scale + 1;
+      if (scale > 60 ) { scale = 60; } // 60 * 2028 = 125000
     }
-
-    if (!checking) {
-      check_them_all();
-    }
-  });
+  }
 });
